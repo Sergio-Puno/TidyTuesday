@@ -1,0 +1,288 @@
+---
+title: "ikea_eda"
+author: "Sergio Puno"
+date: "2/22/2022"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+Source:
+https://github.com/rfordatascience/tidytuesday/blob/master/data/2020/2020-11-03/readme.md
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidytuesdayR)
+library(scales)
+
+```
+
+# Load in the weekly data, IKEA information for this week.
+
+Download weekly data, available in the `tt` object
+
+```{r Load}
+tt <- tt_load("2020-11-03")
+```
+
+```{r}
+# checking for minor preprocessing steps required
+glimpse(tt$ikea)
+
+# first col isn't needed, just a row number/index
+# additionally, pricing needs to be converted to USD, will add new column
+# pricing based on date of 2020-11-03
+ikea <- tt$ikea %>%
+  select(-"...1") %>%
+  mutate(price_usd = 0.27 * price,
+         short_description = str_trim(str_replace_all(short_description,
+                  "\\s+", " "))) %>%
+  add_count(category, name = "category_total")
+
+ikea %>%
+  count(category, sort = TRUE) %>%
+  mutate(category = fct_reorder(category, n)) %>%
+  ggplot(aes(n, category)) +
+  geom_col() +
+  labs(x = "# of items",
+       y = "",
+       title = "Most common categories, IKEA items")
+
+```
+
+### Looking into the distribution of items and price: boxplot time.
+
+Since the pricing can't go below 0, but can scale up to large values, we will
+have to scale the x value of pricing (log 10). Pretty common to perform this
+scaling on pricing information
+
+```{r}
+ikea %>%
+  mutate(category = fct_reorder(category, price_usd)) %>%
+  ggplot(aes(price_usd, category)) +
+  geom_boxplot() +
+  geom_jitter(width = 0, height = .1, alpha = 0.25) +
+  scale_x_log10(labels = dollar) +
+  labs(x = "Price (USD)",
+       y = "",
+       title = "Pricing per category")
+```
+
+This provides some insight into the variety of price offerings:
+<ul>
+<li> `Cafe furniture` is very niche in the product offerings in terms of the 
+price range, especially compared to something like the `TV and media furniture`
+category, which is more broad and has a lot of price points.
+<li> With the ghost point included, you can get a sense of the number of total
+products offered, `Cafe Furniture` again does not have nearly as many offerings 
+as `Tables and desks` which shows a huge variety in products while still having
+a fairly compact price range.
+</ul>
+
+We can look at this data in another way, showing the count of offerings with
+the category name:
+
+```{r}
+library(glue)
+
+ikea %>%
+  mutate(category = glue("{ category } ({ category_total })"),
+         fct_reorder(category, price_usd)) %>%
+  ggplot(aes(price_usd, category)) +
+  geom_boxplot() +
+  scale_x_log10(labels = dollar) +
+  labs(x = "Price (USD)",
+       y = "",
+       title = "Pricing per category")
+```
+
+Lets plot the same but using stacked density plots to check for bimodality, 
+which would not be visible in a boxplot.
+
+This would be possible with standard density plots with faceting but it might 
+become a bit unruly so we will go with ggridges.
+```{r}
+library(ggridges)
+
+ikea %>%
+  mutate(category = glue("{ category } ({ category_total })"),
+         fct_reorder(category, price_usd)) %>%
+  ggplot(aes(price_usd, category)) +
+  geom_density_ridges() +
+  scale_x_log10(labels = dollar) +
+  labs(x = "Price (USD)",
+       y = "",
+       title = "Pricing per category")
+```
+Let's get color options involved, the `other_colors` column is a True/False flag
+so we can double up on the density plots and see if color has an impact on the
+pricing distribution by category.
+
+```{r}
+ikea %>%
+  mutate(category = glue("{ category } ({ category_total })"),
+         fct_reorder(category, price_usd)) %>%
+  ggplot(aes(price_usd, category, fill = other_colors)) +
+  geom_density_ridges(alpha = 0.5) +
+  scale_x_log10(labels = dollar) +
+  labs(x = "Price (USD)",
+       y = "",
+       title = "Pricing per category")
+```
+
+An interesting take away here is the `Bar Furniture` category which shows in 
+blue the availability of other colors as bimodal:
+<ul>
+<li> The higher price node has a similar median to the density in red for no 
+other colors available. 
+<li> The second node is distinctly lower price which may indicate that the 
+availability of other colors may mean a change in material used or finish used
+as many people prefer natural wood furniture which typically would not be
+available in a variety of colors.
+</ul>
+
+The category with something similar but in the complete opposite is `Outdoor furniture`.
+With this category the offerings with other colors as `True` have a higher number
+available at a higher price.
+### Product Names
+Take a step back and let's look at the product naming to see if we need to 
+do any cleaning
+
+```{r}
+ikea %>%
+  count(name, category, sort = TRUE)
+```
+You can see, for example, the name `Besta` comes up for multiple categories, and
+names come up many multiples of times within a category.
+
+```{r}
+ikea %>%
+  mutate(name = fct_lump(name, 20)) %>%
+  filter(name != "Other") %>%
+  count(name, category, sort = TRUE) %>%
+  mutate(name = fct_reorder(name, n, sum),
+         category = fct_reorder(category, n, sum)) %>%
+  ggplot(aes(n, name, fill = category)) +
+  geom_col() +
+  scale_fill_discrete(guide = guide_legend(reverse = TRUE)) +
+  labs(x = "# of items",
+       y = "Name of item")
+```
+This shows what a lot of people know about Ikea but in case you are unaware Ikea 
+has names of product lines that typically will cover multiple categories.
+
+For example, Besta might be the name of a storage system or storage brand which
+offers tv stand units, wardrobe storage, cabinets, etc. 
+
+## Short Description Analysis
+
+```{r}
+ikea %>%
+  separate(short_description,
+           c("main_description", "rest"),
+           sep = ", ",
+           extra = "merge",
+           fill = "right",
+           remove = FALSE) %>%
+  extract(rest, "description_cm", "([\\d\\-xX]+) cm", remove = FALSE) %>%
+  count(category, main_description, sort = TRUE)
+```
+
+Slight alteration to the above code
+
+```{r}
+ikea %>%
+  separate(short_description,
+           c("main_description", "rest"),
+           sep = ", ",
+           extra = "merge",
+           fill = "right",
+           remove = FALSE) %>%
+  extract(rest, "description_cm", "([\\d\\-xX]+) cm", remove = FALSE) %>%
+  unite(category_and_desc, category, main_description, sep = " - ") %>%
+  count(category_and_desc, sort = TRUE)
+```
+
+### Lets look at Volume (size of furniture)
+
+```{r}
+ikea_volume <- ikea %>%
+  select(item_id, name, short_description, category,
+      price_usd, depth, height, width) %>%
+  # 1 cubic cm is a milliliter, we can reprent the volume in liters
+  # mutate(volume_liters = depth * height * width / 1000)
+  # switching to cubic meters, divide by 1 million
+  mutate(volume_m3 = depth * height * width / 1e6) %>%
+  filter(!is.na(volume_m3),
+          volume_m3 >= 0.001) %>%
+  arrange(desc(volume_m3)) %>%
+  add_count(category, name = "category_total")
+
+# checking the volumes for low vol items to filter, retroactively adding filter
+# to the above dataframe creation
+ikea_volume %>%
+  arrange(desc(volume_m3))
+
+ikea_volume %>%
+  mutate(category = glue("{ category } ({ category_total })"),
+        category = fct_reorder(category, volume_m3)) %>%
+  ggplot(aes(volume_m3, category)) +
+  geom_boxplot() +
+  scale_x_log10() +
+  labs(x = "Volume of furniture (cubic meters, log scale)",
+       y = "",
+       title = "Volume of furniture by Category")
+```
+
+### Price vs. Volume
+What is the highest price per cubic meter of furniture from Ikea?
+
+* Impact of category vs impact of size
+
+```{r}
+ikea_volume %>%
+  mutate(category = fct_lump(category, 6)) %>%
+  ggplot(aes(volume_m3, price_usd, color = category)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  scale_x_log10() +
+  scale_y_log10()
+```
+
+Calculate dollars per cubic meter
+
+```{r}
+ikea_volume %>%
+  mutate(dollar_per_m3 = price_usd / volume_m3) %>%
+  arrange(desc(dollar_per_m3))
+```
+
+### Looking at Designers
+
+```{r}
+ikea %>%
+  group_by(designer) %>%
+  summarise(n_items = n(),
+            n_names = n_distinct(name),
+            n_category = n_distinct(category)) %>%
+  arrange(desc(n_names))
+```
+
+It would be difficult to build a model around designer as there are
+many product names that cross the category and each will have a
+relationship with pricing. For example, designer A might be focused
+on lower cost models of tables, chairs, wardrobes, etc which would
+impact the outcomes of the model.
+
+```{r}
+ikea_volume %>%
+  lm(log2(price_usd) ~ log2(volume_m3), data = .) %>%
+  summary()
+```
+
+Interpretation:
+
+
+

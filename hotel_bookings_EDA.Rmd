@@ -1,0 +1,590 @@
+---
+title: "Hotel Bookings EDA"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+    encoding=encoding,
+    output_file=file.path(dirname(input_file),
+    out_dir, 'index.html'))})
+author: "Sergio Puno"
+date: "2/23/2022"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: cosmo
+    collapsed: true
+    df_print: paged
+editor_options: 
+  chunk_output_type: console
+---
+
+Source:
+https://github.com/rfordatascience/tidytuesday/blob/master/data/2020/2020-02-11/readme.md
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Preparations {.tabset}
+Below are the required packages used if you'd like to reproduce the results. The full
+source code is available at [my github repository](https://github.com/Sergio-Puno).
+
+## Load libraries
+Libraries for data wrangling, general visualization and extra specialized tools.
+
+```{r}
+# data manipulation
+library(tidyverse)
+library(tidytuesdayR)
+library(lubridate)
+library(tidytext)
+library(rlang)
+
+# visualization
+library(ggplot2)
+theme_set(theme_minimal())
+library(scales)
+
+# forecast
+
+# formatting
+library(kableExtra)
+
+```
+
+## Helper functions
+First create functions that can help with some plotting to reduce repeated code chunks.
+
+```{r}
+# quick histogram plotting with median feed-in
+plot_distribution <- function(df, feature, x_intercept) {
+  x <- ggplot(data = df, aes(x = {{feature}})) +
+    geom_histogram(fill = "steelblue3") +
+    geom_vline(xintercept = as.double(x_intercept), color = "red")
+  
+  return(x)
+}
+
+# quick bar plot for univariate analysis
+plot_bar <- function(df, feature, agg_n) {
+  x <- ggplot(data = df, aes(x = {{agg_n}}, y = {{feature}}, fill = {{feature}})) +
+    geom_col() +
+    theme(legend.position="none")
+  
+  return(x)
+}
+```
+
+## Load data
+Import file from TidyTuesday repo and local country abbreviations cross reference csv.
+
+```{r}
+hotels <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-02-11/hotels.csv')
+
+country_codes <- read_csv("country_codes.csv")
+
+head(hotels)
+```
+
+# Data Background
+This information comes from two datasets of hotel demand data, one a resort hotel
+in the region of Algarve and the other a city hotel in the region of Lisbon (both in Portugal).
+
+The brief associated with this data can be found [here](https://www.sciencedirect.com/science/article/pii/S2352340918315191#f0010).
+One consideration mentioned in this briefing was the below:
+<br />
+
+*"...even though the capture of data took considered a timespan prior to arrival date, it is understandable that the distribution of some variables differ between non canceled and canceled bookings."*
+<br />
+
+We'll have to consider the impact of a cancelled booking on each distribution and how
+a cancelled booking is different (on average) compared to a booking that showed up.
+
+# Data Cleaning / Prelimary Analysis
+## Missing Values
+Quick missing values check to see if there are any massive holes in the data:
+
+```{r}
+# checking for missing values
+missing_values <- hotels %>% 
+  summarise(across(everything(), ~sum(is.na(.))))
+
+missing_values <- gather(missing_values, key = "feature", value = "missing_pct")
+
+missing_values %>%
+  ggplot(aes(x = reorder(feature, missing_pct), y = missing_pct)) +
+  geom_bar(stat = "identity", fill = "tomato2") +
+  coord_flip()
+```
+
+<br />
+
+Looks clean, only the children records seem to have missing values, about 4% of the records
+are missing child data, this is not a huge deal so we can keep these records.
+
+### Creating/Updating data fields
+Generating any new fields/columns that I feel may be helpful in subsequent analysis
+as well as changing some data types from the initial import such as converting certain
+fields to factors.
+
+```{r}
+# creating a new date column with the year/month/day of month cols for arrivals
+hotels <- hotels %>% 
+  mutate(arrival_date = dmy(paste(arrival_date_day_of_month,
+                                  arrival_date_month,
+                                  arrival_date_year,
+                                  sep = "-"))) %>% 
+  mutate(is_canceled = as.factor(is_canceled),
+         stays_in_weekend_nights = as.factor(stays_in_weekend_nights),
+         stays_in_week_nights = as.factor(stays_in_week_nights),
+         meal = as.factor(meal),
+         market_segment = as.factor(market_segment),
+         distribution_channel = as.factor(distribution_channel),
+         reserved_room_type = as.factor(reserved_room_type),
+         assigned_room_type = as.factor(assigned_room_type),
+         deposit_type = as.factor(deposit_type),
+         customer_type = as.factor(customer_type),
+         reservation_status = as.factor(reservation_status))
+```
+
+## Univariate Analysis {.tabset}
+Distributions and getting to know our data.
+
+<br />
+
+A few things I have in mind while reviewing the distributions, many of these apply
+to all distributions I'll look at and not just lead-time specific:
+<ul>
+<li> How extreme are outliers compared to the majority of the data's distribution
+<li> Check for any bimodal distributions or any cycles
+<li> Would the cancellation vs. non-cancellation factor impact the distributions
+<li> General assessment of the feature's value as a predictor of either the average
+daily rate, or for predicting a cancellation
+</ul>
+
+You can perform univariate analysis and simple EDA on each feature in order to gain some insight into, for example, categorical features that display low entropy or class
+imbalance. These all will inform your model so the features should be reviews for 
+skewness and normality.
+
+### Market Segments
+Checking most common segments that drive bookings, which appears to be online travel
+agents by a large margin with offline travel agent/tour operator and groups following.
+Aviation and complementary markets are extremely low (less than 1% of total bookings
+combined).
+
+```{r}
+hotels %>% 
+  filter(market_segment != "Undefined") %>% 
+  count(market_segment, sort= TRUE) %>% 
+  plot_bar(., market_segment, n) +
+  labs(x = "# of Bookings", y = "Market Segment",
+       title = "Number of Bookings by Market Segment") +
+  scale_x_continuous(labels = comma)
+
+hotels %>% 
+  group_by(market_segment) %>% 
+  summarise(count = n()) %>% 
+  mutate(freq = round(count / sum(count), 3)) %>% 
+  arrange(desc(freq))
+```
+
+### Countries of visitors
+Identifying most common customer country of origin, bringing in full country name from
+the helper file I loaded in for country abbreviations. Trips within Portugal are
+the most common at 40% of total bookings, and the UK/France/Spain/Germany bringing
+up the top 5.
+
+```{r}
+hotels %>% 
+  left_join(., country_codes, by = "country") %>% 
+  filter(!is.na(country_name)) %>% 
+  mutate(country_name = fct_lump(country_name, 20)) %>% 
+  count(country_name, sort= TRUE) %>% 
+  mutate(country_name = fct_reorder(country_name, n)) %>% 
+  filter(country_name != "Other") %>% 
+  plot_bar(., country_name, n) +
+  labs(x = "# of Bookings", y = "Country of Origin",
+       title = "Number of Bookings by Country") +
+  scale_x_continuous(labels = comma)
+
+hotels %>% 
+  group_by(country) %>% 
+  summarise(count = n()) %>% 
+  mutate(freq = round(count / sum(count), 3)) %>% 
+  arrange(desc(freq)) %>% 
+  head(10)
+```
+
+### Customer Type
+What is the most common customer type, we can study this in combination with other
+details we have such as `reserved_room_type` or `deposit_Type` to see if certain
+types of customers are aligned with certain other requirements.
+
+```{r}
+hotels %>% 
+  count(customer_type, sort = TRUE) %>% 
+  plot_bar(., customer_type, n) +
+  labs(x = "Customer Type", y = "",
+       title = "Customer Types")
+
+hotels %>% 
+  group_by(customer_type) %>% 
+  summarise(count = n()) %>% 
+  mutate(freq = round(count / sum(count), 3)) %>% 
+  arrange(desc(freq))
+```
+
+### ADR
+Average Daily Rate - this is the only value field we have related to cost in this 
+dataset, with this we can take a look later on at how where some of the rate is 
+derived from (such as the room type, market segment, meal type, etc.)
+
+```{r}
+adr_median <- hotels %>% 
+  filter(adr > 0) %>% 
+  summarise(median = median(adr))
+
+hotels %>% 
+  filter(adr > 0) %>% 
+  plot_distribution(., adr, adr_median) +
+  scale_x_log10(labels = dollar) +
+  labs(x = "ADR (median in red)",
+       y = "Occurences",
+       title = "Distribution of ADR values above $0")
+
+# top 10 ADR values
+hotels %>% 
+  arrange(desc(adr)) %>% 
+  head(10) %>% 
+  select(hotel, is_canceled, arrival_date, assigned_room_type, adr)
+```
+
+### Lead Time
+Taking a look at the `lead_time` and arrival days to breakdown the bookings , we can split the lead times into two 
+categories, same day bookings and standard ahead of date bookings.
+
+```{r}
+# median for non 0 LT (lead time) bookings
+nonzero_LT_median <- hotels %>% 
+  filter(lead_time > 0) %>% 
+  summarise(median = median(lead_time))
+
+# for non same-day bookings, was does the lead time distribution look like
+hotels %>% 
+  filter(lead_time > 0) %>% 
+  plot_distribution(., lead_time, nonzero_LT_median) +
+  labs(x = "Booking Lead Time", y = "Occurences",
+       title = "Lead Time Distribution (nonzero leadtimes") 
+```
+
+### Assigned Room
+
+```{r}
+hotels %>% 
+  group_by(hotel, assigned_room_type) %>%
+  summarise(count = n()) %>% 
+  mutate(assigned_room_type = reorder_within(assigned_room_type, count, hotel)) %>% 
+  ggplot(aes(count, assigned_room_type, fill = assigned_room_type)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  labs(x = "Occurences",
+       y = "Assigned Room Type",
+       title = "Frequency of Assigned Room Types") +
+  facet_wrap(~ hotel, scales = "free_y") +
+  scale_y_reordered()
+```
+
+<br />
+
+# Market Segment Analysis and Impact
+
+### Market Segment Breakdown
+Checking out the top market segments of each hotel.
+
+```{r}
+# data manipulation for plotting
+hotels_markets <- hotels %>% 
+  filter(market_segment != "Undefined") %>% 
+  mutate(market_segment = fct_lump(market_segment, 4)) %>%
+  count(hotel, market_segment, is_canceled) %>% 
+  group_by(hotel) %>% 
+  mutate(total = sum(n),
+         ratio = n / total,
+         is_canceled = ifelse(is_canceled == 0, "No", "Yes")) %>% 
+  ungroup() %>% 
+  mutate(market_segment = reorder_within(market_segment, ratio, hotel))
+
+hotels_markets %>% 
+  ggplot(aes(ratio, market_segment, fill = is_canceled)) +
+  geom_col() +
+  labs(x = "Percentage of Bookings", y = "Market Segment",
+       title = "Hotel Bookings by Market Segment: Hotel Split",
+       fill = "Booking Canceled") +
+  facet_wrap(~ hotel, scales = "free_y") +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  scale_fill_manual(values = c("steelblue2", "tomato2")) +
+  scale_y_reordered() +
+  theme(legend.position = "top")
+```
+
+<br />
+
+Looking at the results, we can see:
+<ul>
+<li> The majority of people use travel agents (both online and offline) though we don't know the breakdown of offline agents to tour operators. 
+<li> `Direct` is a close follow up for the resort hotel whereas `Groups` is the follow up for the city hotel. 
+<li> Cancellations are quite proportionally high for the city hotel segments, especially for the group bookings which makes sense as there is a high chance for one individual out of a group to cause a cancellation due to external factors.
+</ul>
+
+Let's take a look at these markets for these two hotels in combination to get a sense
+of the overall bookings pool and cancellations.
+
+```{r}
+hotels_markets <- hotels %>% 
+  filter(market_segment != "Undefined") %>% 
+  group_by(market_segment) %>% 
+  count(market_segment, is_canceled) %>%
+  mutate(total = sum(n),
+         ratio = n / total,
+         is_canceled = ifelse(is_canceled == 0, "No", "Yes")) %>% 
+  arrange(desc(n))
+
+# stacked column chart grouping all bookings
+hotels_markets %>% 
+  ggplot(aes(market_segment, ratio, fill = is_canceled)) +
+  geom_col() +
+  labs(x = "Market Segment", y = "Percentage of Bookings",
+     title = "Hotel Bookings by Market Segment: Combined",
+     fill = "Booking Canceled") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_x_reordered() +
+  scale_fill_manual(values = c("steelblue2", "tomato2")) +
+  theme(legend.position = "top") +
+  coord_flip()
+```
+
+<br />
+
+We can see from this stacked bar chart that overall, for bookings using online 
+travel agents there are between 15% to almost 20% cancellations. Interestingly, 
+compared to the online agents, the `Direct` and `Complementary` bookings have the
+lowest cancellation rates with `Corporate` following closely behind. 
+
+<br />
+
+
+### Arrival date analysis:
+Looking at the breakdown of arrival day-of-week by market segment first.
+
+```{r}
+# looking at the different market segments and arrival day of week for comparisons
+
+hotels %>% 
+  mutate(wday = wday(arrival_date, label = TRUE, week_start = 1)) %>%
+  filter(market_segment != "Undefined") %>% 
+  group_by(wday, market_segment) %>% 
+  count(wday) %>% 
+  ggplot(aes(market_segment, y= n, color= wday)) +
+  geom_point(size=4) +
+  theme(legend.position = "left",
+        plot.title = element_text(size=14)) +
+  coord_flip() +
+  scale_x_discrete(position="to") +
+  labs(x = "") +
+  ggtitle("Arrival by Weekday") +
+  scale_color_hue() +
+  scale_y_log10()
+```
+
+<br />
+
+Looking at the results we find:
+<ul>
+<li> `Online TA`, `Offline TA/TO`, `Groups` appear to be the top three markets;
+TA = Travel Agent, TO = Tour Operators
+<li> You can see that the most common day of week shifts from segment to segment
+with Friday being popular for `Online TA` and `Offline TA/TO` but Monday-Wednesday
+being more common for `Corporate` which makes sense as if you are working you'll
+likely be staying during just the work week
+</ul>
+
+<br />
+
+### Breakdown by day of month
+We can see that the first week fo the month is universally lower in each market
+when compared to say the end of the month which is the top count for all markets 
+except for `Aviation` which has the third week as their peak.
+```{r}
+hotels %>% 
+  mutate(month_week = case_when(arrival_date_day_of_month >= 21 ~ '4th WK',
+                                arrival_date_day_of_month >= 14 ~ '3rd WK',
+                                arrival_date_day_of_month >= 7 ~ '2nd WK',
+                                arrival_date_day_of_month < 7 ~ '1st WK')) %>% 
+  filter(market_segment != "Undefined") %>%
+  group_by(month_week, market_segment) %>% 
+  count(month_week) %>% 
+  ggplot(aes(market_segment, y= n, color= month_week)) +
+  geom_point(size=4) +
+  theme(legend.position = "left",
+        plot.title = element_text(size=14)) +
+  coord_flip() +
+  scale_x_discrete(position="to") +
+  labs(x = "") +
+  ggtitle("Arrival by Week of Month") +
+  scale_color_hue() +
+  scale_y_log10()
+```
+
+<br />
+
+Nothing too spread out for this plot, the main consistency is that the last week
+of the month is almost always the number one week, with `Aviation` having the
+second week as their most common. We can change this up a bit to see if any months
+in particular show trends of bookings.
+
+# Bookings Time Series Analysis
+### Time Series of Bookings
+First we'll take a look at a single year available in the dataset which spans from
+July 1st, 2015 to August 31st, 2017. Looking at 2016 for both the city and resort 
+hotels, we can make a few observations:
+
+```{r}
+hotels %>% 
+  filter(between(arrival_date, as.Date("2016-01-01"), as.Date("2016-12-31"))) %>% 
+  group_by(hotel, arrival_date, arrival_date_year) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(arrival_date, count)) +
+  geom_line(aes(color = hotel), size = 1) +
+  facet_wrap(~ hotel, ncol = 1) +
+  theme(legend.position = "none") +
+    labs(x = "Arrival Date", y = "# of Bookings",
+       title = "Number of Bookings (2016)")
+```
+
+<br />
+<ul>
+<li> The city hotel bookings are more varied as there are more total bookings
+(almost double) compared to the resort hotel, but we can see bookings slowly rising
+during the first quarter of the year with a spike between Feb and Mar.
+<li> If you look at the resort bookings, we see the same spike between Feb and Mar, 
+referencing holidays that take place we can find Carnival (Mardi Gras) taking place 
+during this time window.
+time window a
+<li> While I would have expected bookings at a resort to jump in the summer, it appears
+that the period of time with the most spikes in bookings are from Feb to May which is
+more of a spring time focus.
+<li> The final note is the expected spike for new years in both, but this spike for
+city hotels is not a massive spike comparatively while the spike for resorts is fairly
+large compared to the rest of the year.
+</ul>
+
+<br />
+
+```{r}
+hotels %>% 
+  group_by(hotel, arrival_date_year, arrival_date_week_number) %>% 
+  count() %>% 
+  group_by(hotel, arrival_date_week_number) %>% 
+  summarise(avg_bookings = mean(n)) %>% 
+  mutate(year_month = ymd("2000-01-01") + weeks(arrival_date_week_number - 1)) %>% 
+  ggplot(aes(year_month, avg_bookings)) +
+  geom_line(aes(color = hotel), size = 2) +
+  scale_x_date(date_labels = "%b-%d") +
+  facet_wrap(~ hotel, ncol = 1) +
+  theme(legend.position = "none") +
+  labs(x = "Arrival Date", y = "Avg Bookings",
+       title = "Average bookings",
+       subtitle = "July 2015 - August 2017")
+  
+```
+
+<br />
+Overall this average over the time periods provided shows a bit more clearly the 
+trends that each hotel has and how similar/different they can be. Both have a steady 
+climb at the beginning of the year with Carnival bookings leading into a dip from
+July to September and a final increase at the end of the year for new years.
+
+There is some divergence with the city hotel in the second half of the year 
+having a large resurgence in bookings from the end of September to November which 
+we'll have to investigate further to identify what customers are driving this increase.
+
+### Time Series Bookings vs. Market Segment
+Let's try to break down the avg bookings as we did before but break it down by the 
+market segment to see the seasonality that drives business by customer type.
+
+```{r fig.width=15, fig.height=10}
+# setting up colors to use for each plot with same market to color
+cbbPalette <- c("Online TA" = "#000000", "Offline TA/TO" = "#E69F00", 
+                "Groups" = "#56B4E9", "Direct" = "#009E73", "Corporate" = "#F0E442",
+                "Complementary" = "#0072B2", "Aviation" = "#D55E00")
+
+hotels %>% 
+  filter(hotel == "City Hotel") %>% 
+  filter(market_segment != "Undefined") %>% 
+  group_by(market_segment, arrival_date_year, arrival_date_week_number) %>% 
+  count() %>% 
+  group_by(market_segment, arrival_date_week_number) %>% 
+  summarise(avg_bookings = mean(n)) %>% 
+  mutate(year_month = ymd("2000-01-01") + weeks(arrival_date_week_number - 1)) %>%
+  arrange(market_segment) %>% 
+  ggplot(aes(year_month, avg_bookings)) +
+  geom_line(aes(color = market_segment), size = 1) +
+  scale_x_date(date_labels = "%b-%d") +
+  theme(legend.position = "bottom",
+        legend.justification = "left",
+        legend.direction = "horizontal",
+        legend.key.size = unit(1.5, "cm")) +
+  labs(x = "Arrival Date", y = "Avg Bookings",
+       title = "Average bookings: City Hotel vs. Market Segment",
+       subtitle = "July 2015 - August 2017",
+       color = "") +
+  guides(color = guide_legend(nrow = 1)) +
+  scale_color_manual(values = cbbPalette)
+```
+
+<br />
+Based on this breakdown we can see that for the majority of the start of the year
+the bookings for the city hotel are driven largely by online travel agents with a 
+large spike in bookings through offline travel agents or tour operators just after
+October.
+
+Overall the group of Direct, Corporate, Complementary, and Aviation don't contribute
+as much as the other categories. 
+
+```{r fig.width=15, fig.height=10}
+cbbPalette <- c("Online TA" = "#000000", "Offline TA/TO" = "#E69F00", 
+                "Groups" = "#56B4E9", "Direct" = "#009E73", "Corporate" = "#F0E442",
+                "Complementary" = "#0072B2")
+
+hotels %>% 
+  filter(hotel == "Resort Hotel") %>% 
+  filter(market_segment != "Undefined") %>% 
+  group_by(market_segment, arrival_date_year, arrival_date_week_number) %>% 
+  count() %>% 
+  group_by(market_segment, arrival_date_week_number) %>% 
+  summarise(avg_bookings = mean(n)) %>% 
+  mutate(year_month = ymd("2000-01-01") + weeks(arrival_date_week_number - 1)) %>%
+  arrange(market_segment) %>% 
+  ggplot(aes(year_month, avg_bookings)) +
+  geom_line(aes(color = market_segment), size = 1) +
+  scale_x_date(date_labels = "%b-%d") +
+  theme(legend.position = "bottom",
+        legend.justification = "left",
+        legend.direction = "horizontal",
+        legend.key.size = unit(1.5, "cm")) +
+  labs(x = "Arrival Date", y = "Avg Bookings",
+       title = "Average bookings: Resort Hotel vs. Market Segment",
+       subtitle = "July 2015 - August 2017",
+       color = "") +
+  guides(color = guide_legend(nrow = 1)) +
+  scale_color_manual(values = cbbPalette)
+```
+
+# Year-to-year Analysis
+
+```{r}
+
+```
+
